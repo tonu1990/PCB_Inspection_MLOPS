@@ -1,0 +1,51 @@
+name: App — Dry Run (Docker + model mount)
+
+on:
+  workflow_dispatch: {}   # run manually
+
+concurrency:
+  group: app-cicd
+  cancel-in-progress: true
+
+jobs:
+  dry_run:
+    runs-on: [self-hosted, app-cicd]   # uses your Pi app runner
+    steps:
+      - name: Show runner & Docker versions
+        run: |
+          echo "Runner user: $(whoami)"
+          uname -a
+          docker version
+
+      - name: List running containers
+        run: docker ps
+
+      - name: Verify model path exists on host
+        run: |
+          if [ -d /opt/edge/models ]; then
+            echo "OK: /opt/edge/models exists"
+            ls -l /opt/edge/models || true
+          else
+            echo "ERROR: /opt/edge/models missing"; exit 1
+          fi
+
+      - name: Mount /opt/edge/models read-only in a test container
+        run: |
+          docker run --rm -v /opt/edge/models:/models:ro alpine:3.20 sh -lc '
+            echo "Inside container — listing /models:"
+            ls -l /models || true
+            echo "Listing /models/models subfolder:"
+            ls -l /models/models || true
+            echo -n "current.onnx -> "
+            readlink -f /models/current.onnx || echo "not set (this is fine if Model CD hasn’t deployed yet)"
+          '
+
+      - name: Verify the mount is read-only
+        run: |
+          docker run --rm -v /opt/edge/models:/models:ro alpine:3.20 sh -lc '
+            if touch /models/_should_fail 2>/dev/null; then
+              echo "ERROR: mount appears writable (should be read-only)"; exit 1
+            else
+              echo "OK: read-only mount enforced"
+            fi
+          '
