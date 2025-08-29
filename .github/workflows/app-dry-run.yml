@@ -31,21 +31,20 @@ jobs:
 
       - name: Mount /opt/edge/models read-only in a test container
         run: |
-          docker run --rm -v /opt/edge/models:/models:ro alpine:3.20 sh -lc '
-            echo "Inside container — listing /models:"
-            ls -l /models || true
-            echo "Listing /models/models subfolder:"
-            ls -l /models/models || true
-            echo -n "current.onnx -> "
-            readlink -f /models/current.onnx || echo "not set (this is fine if Model CD hasn’t deployed yet)"
-          '
+            docker run --rm -v /opt/edge/models:/opt/edge/models:ro alpine:3.20 sh -lc '
+                echo "Inside container — listing /opt/edge/models:"
+                ls -l /opt/edge/models || true
+                echo "Listing /opt/edge/models/models subfolder:"
+                ls -l /opt/edge/models/models || true
+                echo -n "current.onnx -> "
+                readlink -f /opt/edge/models/current.onnx || echo "not set"
 
       - name: Verify the mount is read-only
         run: |
-          docker run --rm -v /opt/edge/models:/models:ro alpine:3.20 sh -lc '
-            if touch /models/_should_fail 2>/dev/null; then
-              echo "ERROR: mount appears writable (should be read-only)"; exit 1
-            else
-              echo "OK: read-only mount enforced"
-            fi
-          '
+            docker run --rm -v /opt/edge/models:/opt/edge/models:ro alpine:3.20 sh -lc '
+                if touch /opt/edge/models/_should_fail 2>/dev/null; then
+                    echo "ERROR: mount appears writable (should be read-only)"; exit 1
+                else
+                    echo "OK: read-only mount enforced"
+                fi
+            '
