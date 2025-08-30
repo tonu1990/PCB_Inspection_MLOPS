@@ -1,0 +1,60 @@
+name: App CD • placeholder (nginx)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/app-deploy.yml"
+
+jobs:
+  deploy:
+    name: Deploy nginx placeholder on Pi
+    runs-on: [self-hosted, app-cicd, pi5, arm64]
+
+    steps:
+      - name: Docker & disk info
+        run: |
+          docker version
+          df -h /
+
+      - name: Verify model mount exists
+        run: |
+          test -d /opt/edge/models
+          ls -l /opt/edge/models || true
+          readlink -f /opt/edge/models/current.onnx || echo "current.onnx not set yet"
+
+      - name: Pull nginx:alpine
+        run: docker pull nginx:alpine
+
+      - name: Stop & remove previous container (if any)
+        run: |
+          docker stop pcb-app 2>/dev/null || true
+          docker rm   pcb-app 2>/dev/null || true
+
+      - name: Run placeholder container with RO model mount
+        run: |
+          docker run -d --name pcb-app \
+            -p 8080:80 \
+            -v /opt/edge/models:/opt/edge/models:ro \
+            --restart unless-stopped \
+            nginx:alpine
+
+      - name: Health check http://localhost:8080
+        run: |
+          for i in {1..20}; do
+            if curl -fsS http://localhost:8080 >/dev/null; then
+              echo "OK"; exit 0
+            fi
+            echo "Waiting for nginx... ($i)"
+            sleep 1
+          done
+          echo "Health check failed"; exit 1
+
+      - name: Confirm RO mount is enforced
+        run: |
+          docker exec pcb-app sh -c 'touch /opt/edge/models/.should_fail' && {
+            echo "❌ Mount is not read-only!"; exit 1;
+          } || {
+            echo "✅ Read-only mount confirmed";
+          }
