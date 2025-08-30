@@ -38,6 +38,7 @@ jobs:
                 ls -l /opt/edge/models/models || true
                 echo -n "current.onnx -> "
                 readlink -f /opt/edge/models/current.onnx || echo "not set"
+             '
 
       - name: Verify the mount is read-only
         run: |
