@@ -1,83 +1,148 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
-import os, hashlib, time
-from app.onnx_loader import ModelState, load_or_reload, run_inference_safe
-from app.schemas import InfoResponse, InferResponse
+from fastapi import FastAPI, Response, status, UploadFile, File, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
+from pathlib import Path
 
-APP_IMAGE_TAG = os.getenv("APP_IMAGE_TAG", "dev")  # set by CI later
-MODEL_PATH = os.getenv("MODEL_PATH", "/opt/edge/models/current.onnx")
-PORT = int(os.getenv("PORT", "8080"))
+from app.core.settings import settings
+from app.inference.manager import ModelManager
+from app.utils.image_io import load_upload_as_rgb_numpy
 
-app = FastAPI(title="PCB App (FastAPI + ONNX Runtime)", version="0.1.0")
-state = ModelState()
+from fastapi.responses import StreamingResponse  # add import
+import io, json
+from pathlib import Path
 
-def sha256_file(path: str) -> str:
-    try:
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except Exception:
-        return "unknown"
+app = FastAPI(title=settings.app_name)
+app.mount("/ui", StaticFiles(directory="app/ui", html=True), name="ui")
+
+@app.get("/")
+def root():
+    return RedirectResponse(url="/ui/")
+
+manager = ModelManager()
 
 @app.on_event("startup")
-def _startup():
-    load_or_reload(state, MODEL_PATH)
+def startup() -> None:
+    try:
+        manager.load_if_available(settings.model_path)
+    except Exception as e:
+        import logging
+        logging.getLogger("uvicorn.error").warning(f"Model failed to load: {e}")
 
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
 
 @app.get("/readyz")
-def readyz():
-    if state.session is None:
-        return JSONResponse(status_code=503, content={"ready": False, "reason": "no-session"})
-    # optional: run a tiny no-op by checking io names
-    try:
-        _ = state.session.get_inputs()
-        _ = state.session.get_outputs()
+def readyz(response: Response):
+    if manager.predict_dummy_ok():
         return {"ready": True}
-    except Exception as e:
-        return JSONResponse(status_code=503, content={"ready": False, "reason": str(e)})
+    response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return {"ready": False, "reason": "model_not_loaded"}
+
+@app.get("/info")
+def info():
+    return {
+        "app": settings.app_name,
+        "configured_model_path": settings.model_path,  # helps spot env/path mistakes
+        "model": manager.info(),
+    }
+
+# ---------- NEW: Hot-reload endpoint ----------
+
+class ReloadRequest(BaseModel):
+    # Optional: allow overriding the path in dev. In prod you omit this.
+    path: str | None = None
 
 @app.post("/reload")
-def reload_model():
-    load_or_reload(state, MODEL_PATH, force=True)
-    return {"reloaded": state.session is not None, "model_path": MODEL_PATH}
+def reload_model(req: ReloadRequest | None = None):
+    """
+    Hot-reload the model. In production you typically POST {} (no path)
+    after your Model-CD pipeline flips /opt/edge/models/current.onnx.
+    For local dev you may pass {"path": "C:\\full\\path\\to\\file.onnx"} to try another file.
+    """
+    override = None
+    if req and req.path:
+        override = req.path
+        # Basic sanity for prototype
+        if not override.lower().endswith(".onnx"):
+            raise HTTPException(status_code=400, detail="Only .onnx models are supported")
+        if not Path(override).exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {override}")
 
-@app.get("/info", response_model=InfoResponse)
-def info():
-    resolved = os.path.realpath(MODEL_PATH)
-    return InfoResponse(
-        app_image_tag=APP_IMAGE_TAG,
-        model_path=MODEL_PATH,
-        model_resolved_path=resolved if os.path.exists(resolved) else "",
-        model_sha256=sha256_file(resolved) if os.path.exists(resolved) else "missing",
-        opset=state.opset,
-        input_names=[i.name for i in state.session.get_inputs()] if state.session else [],
-        output_names=[o.name for o in state.session.get_outputs()] if state.session else [],
-        last_loaded_utc=state.last_loaded_utc
-    )
+    ok = manager.reload(override)
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Reload failed: {manager.info().get('last_error')}")
 
-@app.post("/infer", response_model=InferResponse)
-async def infer(image: UploadFile = File(...)):
-    if state.session is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-    data = await image.read()
+    return {"reloaded": True, "model": manager.info()}
+
+# ---------- Existing /predict stays the same ----------
+@app.post("/predict")
+def predict(file: UploadFile = File(...)):
+    """
+    Accepts an image and returns YOLO-like detections (prototype):
+    - boxes in original image coords (xyxy)
+    - score and class_id
+    """
+    if not manager.is_ready():
+        raise HTTPException(status_code=503, detail="Model not loaded; /readyz is false")
     try:
-        t0 = time.time()
-        outputs, meta = run_inference_safe(state, data)
-        dt_ms = int((t0 - time.time()) * -1000)
-        return InferResponse(
-            latency_ms=dt_ms,
-            meta=meta,
-            # For now: raw outputs only (lists of shape info + a few numbers).
-            # In a later step we'll add YOLO-style decoding.
-            outputs_preview=[
-                {"name": name, "shape": shp, "first_values": vals}
-                for name, shp, vals in outputs
-            ]
-        )
+        img_rgb = load_upload_as_rgb_numpy(file)
+        dets = manager.predict_detections(img_rgb, conf_thres=0.25, iou_thres=0.45, top_k=300)
+        return {
+            "ok": True,
+            "detections": dets,
+            "input_hw_used": manager.info().get("input_hw"),
+            "layout": manager.info().get("input_layout"),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"inference failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
+
+@app.post("/predict_image")
+def predict_image(file: UploadFile = File(...)):
+    """
+    Returns an annotated PNG with boxes + labels drawn on the uploaded image.
+    If a labels.json is present next to the model file, those names are used.
+    Otherwise we show class_id.
+    """
+    if not manager.is_ready():
+        raise HTTPException(status_code=503, detail="Model not loaded; /readyz is false")
+
+    # 1) Decode image
+    try:
+        img_rgb = load_upload_as_rgb_numpy(file)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 2) Run detections
+    try:
+        dets = manager.predict_detections(img_rgb, conf_thres=0.25, iou_thres=0.45, top_k=300)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
+
+    # 3) Optional labels: look for a labels.json next to the model file
+    labels = None
+    try:
+        mp = manager.info().get("model_path")
+        if mp:
+            lbl_path = Path(mp).with_name("labels.json")
+            if lbl_path.exists():
+                with open(lbl_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    # Expect either ["classA","classB",...] or {"names":[...]}
+                    if isinstance(data, list):
+                        labels = data
+                    elif isinstance(data, dict) and "names" in data and isinstance(data["names"], list):
+                        labels = data["names"]
+    except Exception:
+        # If labels loading fails, just fall back to class_id
+        labels = None
+
+    # 4) Render and return PNG
+    im = manager.draw_detections(img_rgb, dets, labels=labels)
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png")

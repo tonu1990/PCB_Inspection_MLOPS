@@ -1,9 +1,30 @@
-.git
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
+*.so
+.venv/
+venv/
+.env
+*.log
+
+# Node/artifacts (just in case)
+node_modules/
 dist/
 build/
-.env
-.venv_pcb
+
+# Git & IDE
+.git/
+.gitignore
+.vscode/
+.DS_Store
+
+# Local data/models (model is mounted at runtime)
+local_models/
+*.onnx
+
+# Test outputs
+coverage/
+htmlcov/
+pytest_cache/

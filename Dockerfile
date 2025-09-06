@@ -1,37 +1,43 @@
-# ---- Base: Python slim on Debian Bookworm (good on Pi OS 64-bit)
-FROM python:3.11-slim-bookworm AS base
+# ---------- Base image with system libs ----------
+FROM python:3.11-slim AS runtime
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+# Avoid interactive tzdata prompts, speed up apt
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# System deps (minimal). libgomp for some ORT kernels, libjpeg/z for Pillow.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 libjpeg62-turbo libpng16-16 ca-certificates curl && \
-    rm -rf /var/lib/apt/lists/*
+# Install minimal OS deps needed by onnxruntime (CPU) on Debian/Ubuntu
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN useradd -m appuser
+# ---------- App layer ----------
 WORKDIR /app
 
-# Copy and install Python deps
-COPY requirements.txt .
+# Copy only requirement files first to leverage Docker layer caching
+COPY requirements.txt ./requirements.txt
+
+# Install runtime dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app
-COPY app/ app/
+# Copy app code (only what we need)
+COPY app ./app
+COPY config ./config
 
-# Switch to non-root
-USER appuser
-
+# Uvicorn port inside the container
 EXPOSE 8080
-ENV HOST=0.0.0.0 PORT=8080
 
-# MODEL_PATH comes from host env-file; default is the standard late-binding path
-ENV MODEL_PATH=/opt/edge/models/current.onnx
+# Default env (can be overridden at run time)
+ENV APP_HOST=0.0.0.0 \
+    APP_PORT=8080 \
+    MODEL_PATH=/opt/edge/models/current.onnx \
+    MODEL_INPUT_SIZE=640
 
-# Accept an app image tag at build time; fallback to "dev"
-ARG APP_IMAGE_TAG=dev
-ENV APP_IMAGE_TAG=${APP_IMAGE_TAG}
+# Optional: lightweight healthcheck against /healthz
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD \
+  wget -qO- http://127.0.0.1:8080/healthz || exit 1
 
-# Start the API
-CMD ["bash", "-lc", "uvicorn app.main:app --host ${HOST} --port ${PORT}"]
+# Start the API. We pass --port 8080 to match EXPOSE; host mapping decides the public port.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
