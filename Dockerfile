@@ -29,11 +29,6 @@ COPY config ./config
 # Uvicorn port inside the container
 EXPOSE 8080
 
-# Default env (can be overridden at run time)
-ENV APP_HOST=0.0.0.0 \
-    APP_PORT=8080 \
-    MODEL_PATH=/opt/edge/models/current.onnx \
-    MODEL_INPUT_SIZE=640
 
 # Optional: lightweight healthcheck against /healthz
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD \

@@ -7,6 +7,9 @@ In Docker/Pi, you'll pass the same variables via an env file.
 import os
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+load_dotenv()
+
 @dataclass
 class Settings:
     # Where the web server binds (the container will map ports anyway)
