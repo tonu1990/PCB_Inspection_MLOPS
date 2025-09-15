@@ -18,7 +18,7 @@ on:
 
 env:
   # Your image name in GHCR (OWNER becomes lowercase automatically)
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/${{ vars.IMAGE_NAME }}
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/pcb-app
 
 jobs:
   build-push:
