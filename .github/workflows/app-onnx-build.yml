@@ -17,8 +17,8 @@ on:
       - ".github/workflows/app-build.yml"
 
 env:
-  # Your image name in GHCR (OWNER becomes lowercase automatically)
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/pcb-app
+  # Pick image name set in GitHub Repository Variable under IMAGE_NAME
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/${{ vars.IMAGE_NAME }}
 
 jobs:
   build-push:
